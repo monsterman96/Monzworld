@@ -1,0 +1,368 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1.0,viewport-fit=cover" />
+  <title>Fate of the Delta — Demo</title>
+  <style>
+    html,body { height:100%; margin:0; background:#f5f3ee; -webkit-touch-callout:none; -webkit-user-select:none;}
+    #gameContainer { width:100%; height:100vh; overflow:hidden; display:block; }
+    body, button { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial;}
+  </style>
+  <!-- Phaser 3 CDN -->
+  <script src="https://cdn.jsdelivr.net/npm/phaser@3.60.0/dist/phaser.min.js"></script>
+</head>
+<body>
+  <div id="gameContainer"></div>
+
+<script>
+/*
+  Pokémon-style browser demo
+  - Single-file Phaser 3 game
+  - Starter selection, overworld, encounter, battle, catch, XP/level
+  - Simple vector graphics; mobile-friendly
+*/
+
+// ---- Configuration & Data ----
+const GAME_WIDTH = Math.min(window.innerWidth, 960);
+const GAME_HEIGHT = Math.min(window.innerHeight, 720);
+
+const STARTERS = {
+  'Verdan': {type:'Grass', hp:40, atk:8, defense:6, color:0x3fb54a},
+  'Pyroleo': {type:'Fire',  hp:38, atk:9, defense:5, color:0xff7b3b},
+  'Aquibble':{type:'Water', hp:42, atk:7, defense:7, color:0x56b6ff}
+};
+
+const WILD_POOL = [
+  {name:'Piplet', type:'Normal', hp:18, atk:5, color:0xd1cfae, xp:6},
+  {name:'Bramble', type:'Grass', hp:22, atk:6, color:0x7fbf6a, xp:8},
+  {name:'Cinderik', type:'Fire', hp:20, atk:6, color:0xff9a6c, xp:8},
+  {name:'Drizzle', type:'Water', hp:24, atk:6, color:0x66b4ff, xp:9}
+];
+
+// Type-effectiveness (very simple)
+function effectiveness(attackerType, defenderType){
+  const strong = {Fire:'Grass', Grass:'Water', Water:'Fire'};
+  if (strong[attackerType] === defenderType) return 1.5;
+  if (strong[defenderType] === attackerType) return 0.75;
+  return 1.0;
+}
+
+// ---- Utilities ----
+function uid(length=6){
+  const chars = 'abcdefghijklmnopqrstuvwxyz0123456789';
+  let s=''; for(let i=0;i<length;i++) s+=chars[Math.floor(Math.random()*chars.length)];
+  return s;
+}
+
+// ---- Save / Load ----
+const SAVE_KEY = 'delta_demo_save_v1';
+function saveGame(data){ localStorage.setItem(SAVE_KEY, JSON.stringify(data)); }
+function loadGame(){ try { return JSON.parse(localStorage.getItem(SAVE_KEY)); } catch(e){ return null; } }
+
+// ---- Phaser Scenes ----
+class BootScene extends Phaser.Scene {
+  constructor(){ super('BootScene'); }
+  preload(){
+    this.load.image('bg', 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVQIW2NgYGCYBwAB1QG2qQ9bAAAAAElFTkSuQmCC');
+  }
+  create(){
+    this.scene.start('TitleScene');
+  }
+}
+
+class TitleScene extends Phaser.Scene {
+  constructor(){ super('TitleScene'); }
+  create(){
+    this.cameras.main.setBackgroundColor('#e9e6df');
+    this.add.text(GAME_WIDTH/2, 80, 'FATE OF THE DELTA — DEMO', {font:'20px system-ui', color:'#111'}).setOrigin(0.5);
+    this.add.text(GAME_WIDTH/2, 120, 'Starter Selection', {font:'14px system-ui', color:'#333'}).setOrigin(0.5);
+
+    // Starter buttons
+    const keys = Object.keys(STARTERS);
+    const gap = 160;
+    keys.forEach((k,i) => {
+      const x = GAME_WIDTH/2 + (i-1)*(gap);
+      const y = 240;
+      const box = this.add.rectangle(x,y,120,140,0xffffff).setStrokeStyle(2, 0x333333).setOrigin(0.5);
+      const g = this.add.graphics();
+      g.fillStyle(STARTERS[k].color); g.fillCircle(x, y-10, 28);
+      this.add.text(x, y+46, k, {font:'14px system-ui', color:'#111'}).setOrigin(0.5);
+      this.add.text(x, y+66, STARTERS[k].type, {font:'12px system-ui', color:'#555'}).setOrigin(0.5);
+      box.setInteractive({useHandCursor:true}).on('pointerdown', ()=>{
+        // assemble trainer data
+        const mon = createMonsterFromTemplate(k, STARTERS[k]);
+        const trainer = {id:uid(8), name:'Aiko', party:[mon], badges:[], pos:{x:200,y:200}};
+        saveGame({trainer});
+        this.scene.start('WorldScene', {trainer});
+      });
+    });
+
+    // Load button if saved
+    const saved = loadGame();
+    if (saved && saved.trainer){
+      const loadBtn = this.add.text(GAME_WIDTH/2, GAME_HEIGHT-80, 'Load saved game', {font:'14px system-ui', color:'#0066cc'}).setOrigin(0.5).setInteractive({useHandCursor:true});
+      loadBtn.on('pointerdown', ()=> this.scene.start('WorldScene', {trainer: saved.trainer}));
+    }
+  }
+}
+
+function createMonsterFromTemplate(name, template){
+  return {
+    uid: uid(10),
+    name: name,
+    type: template.type || template.type,
+    level: 5,
+    maxHp: template.hp,
+    hp: template.hp,
+    atk: template.atk,
+    def: template.defense || template.def,
+    color: template.color,
+    xp: 0
+  };
+}
+
+function createWildInstance(){
+  const t = WILD_POOL[Math.floor(Math.random()*WILD_POOL.length)];
+  return {
+    uid: uid(8),
+    name: t.name,
+    type: t.type,
+    level: Math.max(3, Math.floor(Math.random()*4)+3),
+    maxHp: t.hp,
+    hp: t.hp,
+    atk: t.atk,
+    def: 4,
+    color: t.color,
+    xp: t.xp
+  };
+}
+
+class WorldScene extends Phaser.Scene {
+  constructor(){ super('WorldScene'); }
+  init(data){ this.trainer = data.trainer || loadGame().trainer; }
+  create(){
+    this.cameras.main.setBackgroundColor('#cfe8d8');
+    // Simple world: a grassy plain with a home box
+    this.add.text(16,16,'Tap anywhere to move. Walk toward tall grass to encounter wild monsters.', {font:'12px system-ui', color:'#113'});
+    this.player = this.add.container(this.trainer.pos.x, this.trainer.pos.y);
+    const pbody = this.add.circle(0,0,18, 0x222222);
+    const pface = this.add.circle(-6,-6,5, 0xffffff);
+    this.player.add([pbody, pface]);
+    this.player.setSize(36,36);
+    this.input.on('pointerdown', (p) => {
+      this.tweens.killTweensOf(this.player);
+      this.tweens.add({
+        targets: this.player, x: p.x, y: p.y, duration: Phaser.Math.Distance.Between(this.player.x, this.player.y, p.x, p.y)*4, onComplete: ()=>{
+          this.trainer.pos.x = this.player.x; this.trainer.pos.y = this.player.y;
+          saveGame({trainer:this.trainer});
+          // random encounter if in "tall grass" area - pick simple region
+          if (this.player.x > GAME_WIDTH*0.6 && Math.random() < 0.6){
+            const wild = createWildInstance();
+            this.scene.start('BattleScene', {trainer:this.trainer, wild});
+          } else if (Math.random()<0.12){
+            // very rare random encounter anywhere
+            const wild = createWildInstance();
+            this.scene.start('BattleScene', {trainer:this.trainer, wild});
+          }
+        }
+      });
+    });
+
+    // UI: party & save button
+    this.partyText = this.add.text(16, GAME_HEIGHT-80, partySummary(this.trainer.party), {font:'14px system-ui', color:'#111'});
+    const saveBtn = this.add.text(GAME_WIDTH-110, GAME_HEIGHT-40, 'Save', {font:'14px system-ui', color:'#006'}).setInteractive({useHandCursor:true});
+    saveBtn.on('pointerdown', ()=> { saveGame({trainer:this.trainer}); this.showNotice('Saved'); });
+
+    // quick button to force battle for testing
+    const testBtn = this.add.text(GAME_WIDTH-200, GAME_HEIGHT-40, 'Battle', {font:'14px system-ui', color:'#006'}).setInteractive({useHandCursor:true});
+    testBtn.on('pointerdown', ()=> {
+      const wild = createWildInstance();
+      this.scene.start('BattleScene', {trainer:this.trainer, wild});
+    });
+
+    // Simple home
+    const home = this.add.rectangle(80, GAME_HEIGHT-200, 120, 80, 0xffffff).setStrokeStyle(3,0x8b5a3c);
+    this.add.text(80, GAME_HEIGHT-200, 'Home (safe)', {font:'12px system-ui', color:'#442'}).setOrigin(0.5);
+  }
+
+  showNotice(text){
+    const n = this.add.text(GAME_WIDTH/2, GAME_HEIGHT/2, text, {font:'20px system-ui', color:'#111'}).setOrigin(0.5);
+    this.tweens.add({targets:n, alpha:{from:1,to:0}, duration:1000, delay:700, onComplete:()=>n.destroy()});
+  }
+
+  update(){
+    if (this.partyText) this.partyText.setText(partySummary(this.trainer.party));
+  }
+}
+
+function partySummary(party){
+  return 'Party: ' + party.map(m=>`${m.name} L${m.level} HP:${m.hp}/${m.maxHp}`).join(' | ');
+}
+
+class BattleScene extends Phaser.Scene {
+  constructor(){ super('BattleScene'); }
+  init(data){ this.trainer = data.trainer; this.wild = data.wild; }
+  create(){
+    this.add.rectangle(0,0,GAME_WIDTH,GAME_HEIGHT, 0xe2f2ff).setOrigin(0);
+    this.add.text(16,16, `A wild ${this.wild.name} appeared!`, {font:'18px system-ui', color:'#111'});
+    // draw player mon and wild
+    this.playerMon = this.trainer.party[0];
+    this.wildMon = this.wild;
+    // top right: wild sprite box
+    this.wildBox = this.add.container(GAME_WIDTH-140, 120);
+    this.wildBox.add(this.add.circle(0,0,36, this.wildMon.color));
+    this.wildBox.add(this.add.text(60, -14, `${this.wildMon.name} L${this.wildMon.level}`, {font:'14px system-ui', color:'#111'}));
+    this.wildHpText = this.add.text(GAME_WIDTH-140, 170, `HP: ${this.wildMon.hp}/${this.wildMon.maxHp}`, {font:'14px system-ui', color:'#111'}).setOrigin(0.5);
+    // bottom left: player mon
+    this.playerBox = this.add.container(120, GAME_HEIGHT-160);
+    this.playerBox.add(this.add.circle(0,0,34, this.playerMon.color));
+    this.playerBox.add(this.add.text(-20,60, `${this.playerMon.name} L${this.playerMon.level}`, {font:'14px system-ui', color:'#111'}));
+    this.playerHpText = this.add.text(120, GAME_HEIGHT-100, `HP: ${this.playerMon.hp}/${this.playerMon.maxHp}`, {font:'14px system-ui', color:'#111'}).setOrigin(0.5);
+
+    // Action UI
+    this.actionContainer = this.add.container(GAME_WIDTH/2, GAME_HEIGHT-80);
+    const btnNames = ['Attack','Use Ball','Run'];
+    btnNames.forEach((t,i)=>{
+      const b = this.add.rectangle((i-1)*110,0,100,44,0xffffff).setStrokeStyle(2,0x666);
+      const lab = this.add.text((i-1)*110,0,t,{font:'14px system-ui', color:'#111'}).setOrigin(0.5);
+      b.setInteractive({useHandCursor:true}).on('pointerdown', ()=> this.onAction(t));
+      this.actionContainer.add([b,lab]);
+    });
+
+    this.log = this.add.text(16, GAME_HEIGHT-240, '', {font:'13px system-ui', color:'#111', wordWrap:{width:GAME_WIDTH-32}});
+    this.turn = 'player';
+    this.updateHud();
+  }
+
+  updateHud(){
+    if (this.playerHpText) this.playerHpText.setText(`HP: ${this.playerMon.hp}/${this.playerMon.maxHp}`);
+    if (this.wildHpText) this.wildHpText.setText(`HP: ${this.wildMon.hp}/${this.wildMon.maxHp}`);
+  }
+
+  async onAction(action){
+    if (this.acting) return;
+    this.acting = true;
+    if (action === 'Attack'){
+      // simple damage calc
+      const base = this.playerMon.atk + Math.floor(Math.random()*4);
+      const eff = effectiveness(this.playerMon.type, this.wildMon.type);
+      const dmg = Math.max(1, Math.round((base - this.wildMon.def) * eff));
+      this.wildMon.hp = Math.max(0, this.wildMon.hp - dmg);
+      this.log.setText(`${this.playerMon.name} used Attack — dealt ${dmg} damage!`);
+      this.updateHud();
+      await wait(700);
+      if (this.wildMon.hp <= 0){
+        await this.onVictory();
+      } else {
+        await this.enemyTurn();
+      }
+    } else if (action === 'Use Ball'){
+      const success = catchRoll(this.playerMon.level, this.wildMon);
+      this.log.setText(`You threw a Delta Ball...`);
+      await wait(800);
+      if (success){
+        this.log.setText(`Caught ${this.wildMon.name}!`);
+        // add to party or PC (simple: add if party < 6)
+        if (this.trainer.party.length < 6){
+          const newMon = {...this.wildMon, uid: uid(10), xp:0};
+          this.trainer.party.push(newMon);
+          saveGame({trainer:this.trainer});
+        } else {
+          // PC logic omitted — just ignore
+          const newMon = {...this.wildMon, uid: uid(10), xp:0};
+          this.trainer.party.push(newMon);
+        }
+        await wait(700);
+        this.scene.start('WorldScene', {trainer:this.trainer});
+      } else {
+        this.log.setText(`It broke free!`);
+        await wait(600);
+        await this.enemyTurn();
+      }
+    } else if (action === 'Run'){
+      if (Math.random() < 0.6){
+        this.log.setText('Got away safely!');
+        await wait(500);
+        this.scene.start('WorldScene', {trainer:this.trainer});
+      } else {
+        this.log.setText('Could not escape!');
+        await wait(500);
+        await this.enemyTurn();
+      }
+    }
+    this.acting = false;
+  }
+
+  async enemyTurn(){
+    const base = this.wildMon.atk + Math.floor(Math.random()*3);
+    const eff = effectiveness(this.wildMon.type, this.playerMon.type);
+    const dmg = Math.max(1, Math.round((base - this.playerMon.def) * eff));
+    this.playerMon.hp = Math.max(0, this.playerMon.hp - dmg);
+    this.log.setText(`${this.wildMon.name} attacked — you took ${dmg} damage!`);
+    this.updateHud();
+    await wait(800);
+    if (this.playerMon.hp <= 0){
+      this.log.setText(`${this.playerMon.name} fainted!`);
+      await wait(800);
+      // simple faint handling: revive at low HP and go back
+      this.playerMon.hp = Math.max(1, Math.floor(this.playerMon.maxHp*0.4));
+      this.scene.start('WorldScene', {trainer:this.trainer});
+    }
+  }
+
+  async onVictory(){
+    this.log.setText(`You defeated ${this.wildMon.name}!`);
+    await wait(800);
+    // give XP to first mon
+    const gain = this.wildMon.xp + Math.floor(this.wildMon.level/2);
+    this.playerMon.xp = (this.playerMon.xp || 0) + gain;
+    this.log.setText(`${this.playerMon.name} gained ${gain} XP!`);
+    await wait(900);
+    // level up if xp > threshold
+    const threshold = 10 + this.playerMon.level * 5;
+    if (this.playerMon.xp >= threshold){
+      this.playerMon.level += 1;
+      this.playerMon.maxHp += 4;
+      this.playerMon.atk += 2;
+      this.playerMon.def += 1;
+      this.playerMon.hp = this.playerMon.maxHp;
+      this.playerMon.xp = 0;
+      this.log.setText(`${this.playerMon.name} leveled up to L${this.playerMon.level}!`);
+      await wait(900);
+    }
+    saveGame({trainer:this.trainer});
+    this.scene.start('WorldScene', {trainer:this.trainer});
+  }
+}
+
+function catchRoll(level, target){
+  // simple chance-based formula; stronger when wild HP low
+  const hpFactor = 1 - (target.hp/target.maxHp);
+  const baseChance = 0.25 + hpFactor*0.5 + (level - target.level)*0.02;
+  return Math.random() < Phaser.Math.Clamp(baseChance, 0.05, 0.95);
+}
+
+function wait(ms){ return new Promise(res=>setTimeout(res, ms)); }
+
+// ---- Game Start ----
+const config = {
+  type: Phaser.AUTO,
+  width: GAME_WIDTH,
+  height: GAME_HEIGHT,
+  parent: 'gameContainer',
+  backgroundColor:'#eaeaea',
+  scene: [BootScene, TitleScene, WorldScene, BattleScene]
+};
+
+const game = new Phaser.Game(config);
+
+// Resize handling for mobile orientation changes
+window.addEventListener('resize', ()=> {
+  const w = Math.min(window.innerWidth, 960);
+  const h = Math.min(window.innerHeight, 720);
+  game.scale.resize(w,h);
+});
+</script>
+</body>
+</html>
